@@ -1,7 +1,12 @@
-# Sample Hardhat 3 Beta Project (minimal)
+# Blockchain Crowdfunding (ERC-20) — Hardhat 3 (TypeScript)
 
-This project has a minimal setup of Hardhat 3 Beta, without any plugins.
+Proiect pentru tema: colectare fonduri in token ERC-20 de la mai multi contribuitori, sponsorizare procentuala si distributie catre beneficiari.
 
-## What's included?
+## Cerinte
+- Node.js + npm
+- Git (optional)
+- Windows / Linux / macOS (merge pe toate)
 
-The project includes native support for TypeScript, Hardhat scripts, tasks, and support for Solidity compilation and tests.
+## Instalare
+```bash
+npm install
