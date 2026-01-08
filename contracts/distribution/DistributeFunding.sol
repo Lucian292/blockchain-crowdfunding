@@ -8,6 +8,7 @@ import "../interfaces/IToken.sol";
 /**
  * DistributeFunding:
  * - owner adauga beneficiari cu ponderi (basis points din 10000 = 100%)
+ * - suma ponderilor NU poate depasi 10000 (100%)
  * - CrowdFunding transfera tokenuri aici si cheama notifyFundsReceived()
  * - fiecare beneficiar poate claim o singura data
  */
@@ -26,6 +27,9 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
 
     uint256 public totalReceived;
     bool public fundingNotified;
+
+    // suma ponderilor tuturor beneficiarilor (bps)
+    uint16 public totalWeightBps;
 
     // optional: poti seta crowdFunding, ca sa restrictionezi notify
     address public crowdFunding;
@@ -50,6 +54,10 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
         require(weightBps > 0 && weightBps <= 10000, "bad weight");
         require(!beneficiaries[who].exists, "exists");
 
+        // Fix: nu permitem suma ponderilor > 100%
+        require(uint256(totalWeightBps) + uint256(weightBps) <= 10000, "total weight > 100%");
+        totalWeightBps += weightBps;
+
         beneficiaries[who] = Beneficiary({
             weightBps: weightBps,
             exists: true,
@@ -70,6 +78,9 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
         }
         require(!fundingNotified, "already notified");
         require(totalAmount > 0, "amount=0");
+
+        // optional (sigur): macar un beneficiar
+        require(totalWeightBps > 0, "no beneficiaries");
 
         fundingNotified = true;
         totalReceived = totalAmount;
