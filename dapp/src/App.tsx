@@ -5,8 +5,12 @@ import { tokenAbi } from "./contracts/tokenAbi";
 import { crowdAbi } from "./contracts/crowdAbi";
 import { sponsorAbi } from "./contracts/sponsorAbi";
 import { distributeAbi } from "./contracts/distributeAbi";
+import TokenPage from "./TokenPage";
+
+type Page = "main" | "token";
 
 function App() {
+  const [currentPage, setCurrentPage] = useState<Page>("main");
   const [account, setAccount] = useState<string>("");
   const [ethBalance, setEthBalance] = useState<string>("");
 
@@ -15,7 +19,6 @@ function App() {
   const [tokenDecimals, setTokenDecimals] = useState<number>(18);
   const [tokenBalance, setTokenBalance] = useState<string>("0");
   const [pricePerToken, setPricePerToken] = useState<string>("");
-  const [buyAmount, setBuyAmount] = useState<string>("");
 
   // Crowdfunding
   const [cfState, setCfState] = useState<string>("-");
@@ -28,7 +31,6 @@ function App() {
 
   const [connecting, setConnecting] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [buying, setBuying] = useState(false);
   const [approving, setApproving] = useState(false);
   const [contributing, setContributing] = useState(false);
 
@@ -165,36 +167,6 @@ function App() {
   }
 
 
-  async function buyTokens() {
-    if (!buyAmount || Number(buyAmount) <= 0) {
-      alert("Introdu o suma valida de token");
-      return;
-    }
-
-    try {
-      setBuying(true);
-
-      const provider = await getProvider();
-      const signer = await provider.getSigner();
-      const token = new ethers.Contract(ADDRESSES.token, tokenAbi, signer);
-
-      const amountUnits = ethers.parseUnits(buyAmount, tokenDecimals);
-
-      const ppu: bigint = await token.pricePerUnitWei();
-      const costWei = amountUnits * ppu;
-
-      const tx = await token.buyTokens(amountUnits, { value: costWei });
-      await tx.wait();
-
-      await refreshAll();
-      setBuyAmount("");
-    } catch (err: unknown) {
-      console.error(err);
-      alert(getErrorMessage(err));
-    } finally {
-      setBuying(false);
-    }
-  }
 
   async function approveCrowd() {
     if (!approveAmount || Number(approveAmount) <= 0) {
@@ -505,6 +477,29 @@ function App() {
 
 
 
+  if (currentPage === "token" && account) {
+    return (
+      <div style={{ padding: "2rem", fontFamily: "system-ui", maxWidth: 1000 }}>
+        <div style={{ marginBottom: "2rem" }}>
+          <button
+            onClick={() => setCurrentPage("main")}
+            style={{ marginRight: "1rem", padding: "8px 16px" }}
+          >
+            ← Back to Main
+          </button>
+        </div>
+        <TokenPage
+          account={account}
+          tokenSymbol={tokenSymbol}
+          tokenDecimals={tokenDecimals}
+          tokenBalance={tokenBalance}
+          pricePerToken={pricePerToken}
+          onRefresh={refreshAll}
+        />
+      </div>
+    );
+  }
+
   return (
     <div style={{ padding: "2rem", fontFamily: "system-ui", maxWidth: 1000 }}>
       <h1>Blockchain Crowdfunding DApp</h1>
@@ -515,31 +510,21 @@ function App() {
         </button>
       ) : (
         <>
+          <div style={{ marginBottom: "1rem", display: "flex", gap: "1rem", alignItems: "center" }}>
+            <button
+              onClick={() => setCurrentPage("token")}
+              style={{ padding: "8px 16px" }}
+            >
+              Token Operations
+            </button>
+          </div>
+
           <p><b>Account:</b> {account}</p>
           <p><b>ETH Balance:</b> {ethBalance}</p>
 
           <button onClick={() => refreshAll()} disabled={loading} style={{ marginBottom: 16 }}>
             {loading ? "Refreshing..." : "Refresh All"}
           </button>
-
-          <hr />
-
-          <h2>Token</h2>
-          <p><b>Symbol:</b> {tokenSymbol}</p>
-          <p><b>Balance:</b> {tokenBalance}</p>
-          <p><b>Price:</b> {pricePerToken} ETH / token</p>
-
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={buyAmount}
-              onChange={(e) => setBuyAmount(e.target.value)}
-              placeholder="Buy amount (e.g. 10)"
-              style={{ padding: 8, width: 220 }}
-            />
-            <button onClick={buyTokens} disabled={buying}>
-              {buying ? "Buying..." : "Buy Tokens"}
-            </button>
-          </div>
 
           <hr style={{ margin: "24px 0" }} />
 
