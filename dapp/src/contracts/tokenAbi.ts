@@ -5,4 +5,6 @@ export const tokenAbi = [
   "function balanceOf(address) view returns (uint256)",
   "function pricePerUnitWei() view returns (uint256)",
   "function buyTokens(uint256 tokenAmount) payable",
+  "function approve(address spender, uint256 value) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
 ] as const;
