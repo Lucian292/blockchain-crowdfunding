@@ -1,18 +1,34 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ethers } from "ethers";
 import { ADDRESSES } from "./contracts/addresses";
 import { tokenAbi } from "./contracts/tokenAbi";
 import { crowdAbi } from "./contracts/crowdAbi";
 import { sponsorAbi } from "./contracts/sponsorAbi";
 import { distributeAbi } from "./contracts/distributeAbi";
+import { factoryAbi } from "./contracts/factoryAbi";
 import TokenPage from "./TokenPage";
 
 type Page = "main" | "token";
+
+interface Campaign {
+  address: string;
+  name?: string;
+}
+
+const CAMPAIGNS_STORAGE_KEY = "crowdfunding_campaigns";
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("main");
   const [account, setAccount] = useState<string>("");
   const [ethBalance, setEthBalance] = useState<string>("");
+
+  // Campaign management
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [selectedCampaign, setSelectedCampaign] = useState<string>("");
+  const [newCampaignAddress, setNewCampaignAddress] = useState<string>("");
+  const [factoryAddress, setFactoryAddress] = useState<string>(ADDRESSES.factory || "");
+  const [newCampaignGoal, setNewCampaignGoal] = useState<string>("");
+  const [creatingCampaign, setCreatingCampaign] = useState(false);
 
   // Token
   const [tokenSymbol, setTokenSymbol] = useState<string>("EDU");
@@ -58,6 +74,42 @@ function App() {
   const [totalWeightBps, setTotalWeightBps] = useState<string>("0");
   const [benCount, setBenCount] = useState<string>("0");
 
+  // Load campaigns from localStorage on mount
+  useEffect(() => {
+    const stored = localStorage.getItem(CAMPAIGNS_STORAGE_KEY);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as Campaign[];
+        setCampaigns(parsed);
+        // If there's a default campaign in ADDRESSES, add it if not present
+        if (ADDRESSES.crowd && !parsed.find(c => c.address.toLowerCase() === ADDRESSES.crowd.toLowerCase())) {
+          const defaultCampaigns = [{ address: ADDRESSES.crowd, name: "Default Campaign" }, ...parsed];
+          setCampaigns(defaultCampaigns);
+          setSelectedCampaign(ADDRESSES.crowd);
+          localStorage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(defaultCampaigns));
+        } else if (parsed.length > 0 && !selectedCampaign) {
+          setSelectedCampaign(parsed[0].address);
+        }
+      } catch (e) {
+        console.error("Failed to load campaigns from storage", e);
+      }
+    } else {
+      // Initialize with default campaign if available
+      if (ADDRESSES.crowd) {
+        const defaultCampaigns = [{ address: ADDRESSES.crowd, name: "Default Campaign" }];
+        setCampaigns(defaultCampaigns);
+        setSelectedCampaign(ADDRESSES.crowd);
+        localStorage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(defaultCampaigns));
+      }
+    }
+  }, []);
+
+  // Save campaigns to localStorage whenever they change
+  useEffect(() => {
+    if (campaigns.length > 0) {
+      localStorage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(campaigns));
+    }
+  }, [campaigns]);
 
   function getErrorMessage(err: unknown): string {
     if (err instanceof Error) return err.message;
@@ -96,7 +148,7 @@ function App() {
 
   async function refreshAll(addr?: string) {
     const user = addr ?? account;
-    if (!user) return;
+    if (!user || !selectedCampaign) return;
 
     try {
       setLoading(true);
@@ -123,8 +175,8 @@ function App() {
       const pricePerTokenWei = BigInt(ppu) * (BigInt(10) ** BigInt(decimals));
       setPricePerToken(ethers.formatEther(pricePerTokenWei));
 
-      // CrowdFunding (read-only)
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, provider);
+      // CrowdFunding (read-only) - use selected campaign
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, provider);
 
       const [stateStr, goal, total, mine, ownerAddr] = await Promise.all([
         crowd.getStateString(),
@@ -166,9 +218,100 @@ function App() {
     }
   }
 
+  function addCampaign(address: string, name?: string) {
+    if (!ethers.isAddress(address)) {
+      alert("Invalid address");
+      return;
+    }
+    const normalized = address.toLowerCase();
+    if (campaigns.find(c => c.address.toLowerCase() === normalized)) {
+      alert("Campaign already exists");
+      return;
+    }
+    const newCampaigns = [...campaigns, { address: normalized, name: name || `Campaign ${campaigns.length + 1}` }];
+    setCampaigns(newCampaigns);
+    if (!selectedCampaign) {
+      setSelectedCampaign(normalized);
+    }
+    setNewCampaignAddress("");
+  }
+
+  function removeCampaign(address: string) {
+    const newCampaigns = campaigns.filter(c => c.address.toLowerCase() !== address.toLowerCase());
+    setCampaigns(newCampaigns);
+    if (selectedCampaign.toLowerCase() === address.toLowerCase()) {
+      setSelectedCampaign(newCampaigns.length > 0 ? newCampaigns[0].address : "");
+    }
+  }
+
+  async function createCampaignViaFactory() {
+    if (!factoryAddress || !ethers.isAddress(factoryAddress)) {
+      alert("Invalid factory address");
+      return;
+    }
+    if (!newCampaignGoal || Number(newCampaignGoal) <= 0) {
+      alert("Invalid funding goal");
+      return;
+    }
+
+    try {
+      setCreatingCampaign(true);
+      const provider = await getProvider();
+      const signer = await provider.getSigner();
+      const factory = new ethers.Contract(factoryAddress, factoryAbi, signer);
+
+      const goalUnits = ethers.parseUnits(newCampaignGoal, tokenDecimals);
+      const tx = await factory.createCampaign(
+        ADDRESSES.token,
+        goalUnits,
+        ADDRESSES.sponsor,
+        ADDRESSES.distribute
+      );
+      const receipt = await tx.wait();
+
+      // Find the CampaignCreated event
+      const event = receipt.logs.find((log: any) => {
+        try {
+          const parsed = factory.interface.parseLog(log);
+          return parsed?.name === "CampaignCreated";
+        } catch {
+          return false;
+        }
+      });
+
+      if (event) {
+        const parsed = factory.interface.parseLog(event);
+        const campaignAddress = parsed?.args[0];
+        if (campaignAddress) {
+          addCampaign(campaignAddress, `Campaign ${campaigns.length + 1}`);
+          setNewCampaignGoal("");
+          alert(`Campaign created: ${campaignAddress}`);
+        }
+      } else {
+        // Fallback: query the factory for the latest campaign
+        const allCampaigns = await factory.getAllCampaigns();
+        if (allCampaigns.length > 0) {
+          const newAddress = allCampaigns[allCampaigns.length - 1];
+          addCampaign(newAddress, `Campaign ${campaigns.length + 1}`);
+          setNewCampaignGoal("");
+          alert(`Campaign created: ${newAddress}`);
+        }
+      }
+    } catch (err: unknown) {
+      console.error(err);
+      alert(getErrorMessage(err));
+    } finally {
+      setCreatingCampaign(false);
+    }
+  }
+
 
 
   async function approveCrowd() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!approveAmount || Number(approveAmount) <= 0) {
       alert("Introdu o suma valida pentru approve");
       return;
@@ -183,7 +326,7 @@ function App() {
       const token = new ethers.Contract(ADDRESSES.token, tokenAbi, signer);
 
       const amountUnits = ethers.parseUnits(approveAmount, tokenDecimals);
-      const tx = await token.approve(ADDRESSES.crowd, amountUnits);
+      const tx = await token.approve(selectedCampaign, amountUnits);
       await tx.wait();
 
       await refreshAll();
@@ -197,6 +340,10 @@ function App() {
   }
 
   async function contribute() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!contributeAmount || Number(contributeAmount) <= 0) {
       alert("Introdu o suma valida pentru contribute");
       return;
@@ -209,7 +356,7 @@ function App() {
       const signer = await provider.getSigner();
 
       const token = new ethers.Contract(ADDRESSES.token, tokenAbi, signer);
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       // 1) verifica starea inainte (mesaj corect pentru profesor)
       const stateStr: string = await crowd.getStateString();
@@ -220,7 +367,7 @@ function App() {
 
       // 2) allowance dupa (doar daca e permis sa contribui)
       const amountUnits = ethers.parseUnits(contributeAmount, tokenDecimals);
-      const allowance: bigint = await token.allowance(account, ADDRESSES.crowd);
+      const allowance: bigint = await token.allowance(account, selectedCampaign);
 
       if (allowance < amountUnits) {
         alert("Allowance insuficient. Fa approve inainte (sau mareste approve).");
@@ -245,6 +392,10 @@ function App() {
   }
 
   async function withdraw() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!withdrawAmount || Number(withdrawAmount) <= 0) {
       alert("Introdu o suma valida pentru withdraw");
       return;
@@ -255,7 +406,7 @@ function App() {
 
       const provider = await getProvider();
       const signer = await provider.getSigner();
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       // verifica starea inainte (altfel MetaMask arata erori urate)
       const stateStr: string = await crowd.getStateString();
@@ -318,6 +469,10 @@ function App() {
   }
 
   async function requestSponsorship() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!isOwner) {
       alert("Doar owner poate cere sponsorizare");
       return;
@@ -328,7 +483,7 @@ function App() {
 
       const provider = await getProvider();
       const signer = await provider.getSigner();
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       const tx = await crowd.requestSponsorship();
       await tx.wait();
@@ -343,6 +498,10 @@ function App() {
   }
 
   async function transferToDistribute() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!isOwner) {
       alert("Doar owner poate transfera catre distributie");
       return;
@@ -353,7 +512,7 @@ function App() {
 
       const provider = await getProvider();
       const signer = await provider.getSigner();
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       const tx = await crowd.transferToDistribute();
       await tx.wait();
@@ -528,57 +687,174 @@ function App() {
 
           <hr style={{ margin: "24px 0" }} />
 
-          <h2>CrowdFunding</h2>
-          <p><b>State:</b> {cfState}</p>
-          <p><b>Goal:</b> {cfGoal} {tokenSymbol}</p>
-          <p><b>Total collected:</b> {cfTotal} {tokenSymbol}</p>
-          <p><b>My contribution:</b> {myContribution} {tokenSymbol}</p>
-
-          <h3>1) Approve token pentru CrowdFunding</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={approveAmount}
-              onChange={(e) => setApproveAmount(e.target.value)}
-              placeholder="Approve amount (e.g. 100)"
-              style={{ padding: 8, width: 260 }}
-            />
-            <button onClick={approveCrowd} disabled={approving}>
-              {approving ? "Approving..." : "Approve"}
-            </button>
+          <h2>Campaign Management</h2>
+          <div style={{ marginBottom: "1rem" }}>
+            <label style={{ display: "block", marginBottom: "0.5rem" }}>
+              <b>Select Campaign:</b>
+            </label>
+            <select
+              value={selectedCampaign}
+              onChange={(e) => setSelectedCampaign(e.target.value)}
+              style={{ padding: "8px", minWidth: "400px", marginBottom: "1rem" }}
+            >
+              {campaigns.length === 0 ? (
+                <option value="">No campaigns available</option>
+              ) : (
+                campaigns.map((campaign) => (
+                  <option key={campaign.address} value={campaign.address}>
+                    {campaign.name || campaign.address} ({campaign.address.slice(0, 10)}...)
+                  </option>
+                ))
+              )}
+            </select>
           </div>
 
-          <h3 style={{ marginTop: 16 }}>2) Contribute</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={contributeAmount}
-              onChange={(e) => setContributeAmount(e.target.value)}
-              placeholder="Contribute amount (e.g. 50)"
-              style={{ padding: 8, width: 260 }}
-            />
-            <button onClick={contribute} disabled={contributing}>
-              {contributing ? "Contributing..." : "Contribute"}
-            </button>
+          <div style={{ marginBottom: "1rem", padding: "1rem", border: "1px solid #ccc", borderRadius: "4px" }}>
+            <h3 style={{ marginTop: 0 }}>Add Campaign</h3>
+            <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "1rem" }}>
+              <input
+                value={newCampaignAddress}
+                onChange={(e) => setNewCampaignAddress(e.target.value)}
+                placeholder="Campaign address (0x...)"
+                style={{ padding: 8, width: "400px" }}
+              />
+              <button
+                onClick={() => addCampaign(newCampaignAddress)}
+                disabled={!newCampaignAddress}
+              >
+                Add Campaign
+              </button>
+            </div>
+
+            <div style={{ marginTop: "1rem" }}>
+              <h4>Or Create New Campaign via Factory</h4>
+              <p style={{ fontSize: "0.9em", color: "#666", marginBottom: "0.5rem" }}>
+                Adresa Factory se obține după deploy: <code>npx hardhat run scripts/deploy.ts --network localhost</code>
+              </p>
+              <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+                <input
+                  value={factoryAddress}
+                  onChange={(e) => setFactoryAddress(e.target.value)}
+                  placeholder="Factory contract address (0x...) - vezi output deploy"
+                  style={{ padding: 8, width: "400px" }}
+                />
+              </div>
+              <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                <input
+                  value={newCampaignGoal}
+                  onChange={(e) => setNewCampaignGoal(e.target.value)}
+                  placeholder="Funding goal (e.g. 1000)"
+                  style={{ padding: 8, width: "200px" }}
+                />
+                <button
+                  onClick={createCampaignViaFactory}
+                  disabled={!factoryAddress || !newCampaignGoal || creatingCampaign}
+                >
+                  {creatingCampaign ? "Creating..." : "Create Campaign"}
+                </button>
+              </div>
+            </div>
           </div>
 
-          <h3 style={{ marginTop: 16 }}>3) Withdraw (doar NEFINANTAT)</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={withdrawAmount}
-              onChange={(e) => setWithdrawAmount(e.target.value)}
-              placeholder="Withdraw amount (e.g. 10)"
-              style={{ padding: 8, width: 260 }}
-            />
-            <button onClick={withdraw} disabled={withdrawing}>
-              {withdrawing ? "Withdrawing..." : "Withdraw"}
-            </button>
-          </div>
+          {campaigns.length > 0 && (
+            <div style={{ marginBottom: "1rem" }}>
+              <h3>Campaigns List</h3>
+              <ul style={{ listStyle: "none", padding: 0 }}>
+                {campaigns.map((campaign) => (
+                  <li
+                    key={campaign.address}
+                    style={{
+                      padding: "0.5rem",
+                      marginBottom: "0.5rem",
+                      backgroundColor: selectedCampaign.toLowerCase() === campaign.address.toLowerCase() ? "#1565c0" : "#424242",
+                      color: "#ffffff",
+                      borderRadius: "4px",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <span>
+                      <b>{campaign.name || "Unnamed"}</b> - {campaign.address}
+                    </span>
+                    <button
+                      onClick={() => removeCampaign(campaign.address)}
+                      style={{ padding: "4px 8px", fontSize: "0.9em" }}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
-        <hr style={{ margin: "24px 0" }} />
-        <h2>Owner actions</h2>
-        <p><b>Crowd owner:</b> {cfOwner}</p>
-        <p><b>You are owner:</b> {isOwner ? "YES" : "NO"}</p>
+          <hr style={{ margin: "24px 0" }} />
 
-        <div style={{ opacity: isOwner ? 1 : 0.5 }}>
+          {selectedCampaign ? (
+            <>
+              <h2>CrowdFunding Campaign</h2>
+              <p><b>Campaign Address:</b> {selectedCampaign}</p>
+              <p><b>State:</b> {cfState}</p>
+              <p><b>Goal:</b> {cfGoal} {tokenSymbol}</p>
+              <p><b>Total collected:</b> {cfTotal} {tokenSymbol}</p>
+              <p><b>My contribution:</b> {myContribution} {tokenSymbol}</p>
+            </>
+          ) : (
+            <p style={{ color: "#666" }}>Please select or add a campaign to view details</p>
+          )}
+
+          {selectedCampaign && (
+            <>
+              <h3>1) Approve token pentru CrowdFunding</h3>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  value={approveAmount}
+                  onChange={(e) => setApproveAmount(e.target.value)}
+                  placeholder="Approve amount (e.g. 100)"
+                  style={{ padding: 8, width: 260 }}
+                />
+                <button onClick={approveCrowd} disabled={approving || !selectedCampaign}>
+                  {approving ? "Approving..." : "Approve"}
+                </button>
+              </div>
+
+              <h3 style={{ marginTop: 16 }}>2) Contribute</h3>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  value={contributeAmount}
+                  onChange={(e) => setContributeAmount(e.target.value)}
+                  placeholder="Contribute amount (e.g. 50)"
+                  style={{ padding: 8, width: 260 }}
+                />
+                <button onClick={contribute} disabled={contributing || !selectedCampaign}>
+                  {contributing ? "Contributing..." : "Contribute"}
+                </button>
+              </div>
+
+              <h3 style={{ marginTop: 16 }}>3) Withdraw (doar NEFINANTAT)</h3>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
+                  placeholder="Withdraw amount (e.g. 10)"
+                  style={{ padding: 8, width: 260 }}
+                />
+                <button onClick={withdraw} disabled={withdrawing || !selectedCampaign}>
+                  {withdrawing ? "Withdrawing..." : "Withdraw"}
+                </button>
+              </div>
+            </>
+          )}
+
+        {selectedCampaign && (
+          <>
+            <hr style={{ margin: "24px 0" }} />
+            <h2>Owner actions</h2>
+            <p><b>Crowd owner:</b> {cfOwner}</p>
+            <p><b>You are owner:</b> {isOwner ? "YES" : "NO"}</p>
+
+            <div style={{ opacity: isOwner ? 1 : 0.5 }}>
           <h3>0) Add Beneficiary (DistributeFunding)</h3>
           <p>
             <b>Beneficiaries:</b> {benCount}{" "}
@@ -628,10 +904,12 @@ function App() {
           </button>
 
           <h3 style={{ marginTop: 16 }}>3) Transfer To Distribute</h3>
-          <button onClick={transferToDistribute} disabled={!isOwner || transferringDist}>
+          <button onClick={transferToDistribute} disabled={!isOwner || transferringDist || !selectedCampaign}>
             {transferringDist ? "Transferring..." : "transferToDistribute()"}
           </button>
         </div>
+          </>
+        )}
         
         
         <hr style={{ margin: "24px 0" }} />
@@ -647,9 +925,11 @@ function App() {
         </p>
 
 
-          <p style={{ marginTop: 12, opacity: 0.8 }}>
-            CrowdFunding contract: {ADDRESSES.crowd}
-          </p>
+          {selectedCampaign && (
+            <p style={{ marginTop: 12, opacity: 0.8 }}>
+              Selected Campaign: {selectedCampaign}
+            </p>
+          )}
         </>
       )}
     </div>
