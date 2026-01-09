@@ -13,7 +13,6 @@ interface TokenPageProps {
 }
 
 function TokenPage({
-  account,
   tokenSymbol,
   tokenDecimals,
   tokenBalance,
@@ -43,6 +42,17 @@ function TokenPage({
       setBuying(true);
 
       const provider = await getProvider();
+      
+      // Validate token address exists
+      if (!ADDRESSES.token || !ethers.isAddress(ADDRESSES.token)) {
+        throw new Error("Token address is not configured. Please redeploy contracts.");
+      }
+      
+      const tokenCode = await provider.getCode(ADDRESSES.token);
+      if (tokenCode === "0x") {
+        throw new Error(`Token contract does not exist at address ${ADDRESSES.token}. Please redeploy contracts.`);
+      }
+
       const signer = await provider.getSigner();
       const token = new ethers.Contract(ADDRESSES.token, tokenAbi, signer);
 

@@ -40,7 +40,8 @@ describe("Crowdfunding system", function () {
       await token.getAddress(),
       goal,
       await sponsor.getAddress(),
-      await dist.getAddress()
+      await dist.getAddress(),
+      deployer.address  // Owner is the deployer
     )) as any;
     await crowd.waitForDeployment();
 
