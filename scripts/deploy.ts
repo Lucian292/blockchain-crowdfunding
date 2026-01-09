@@ -37,11 +37,17 @@ async function main() {
   const tx = await dist.setCrowdFunding(await crowd.getAddress());
   await tx.wait();
 
+  // Deploy CampaignFactory
+  const Factory = await ethers.getContractFactory("CampaignFactory");
+  const factory = await Factory.deploy();
+  await factory.waitForDeployment();
+
   console.log("Deployer:", deployer.address);
   console.log("Token:", await token.getAddress());
   console.log("SponsorFunding:", await sponsor.getAddress());
   console.log("DistributeFunding:", await dist.getAddress());
   console.log("CrowdFunding:", await crowd.getAddress());
+  console.log("CampaignFactory:", await factory.getAddress());
 }
 
 main().catch((err) => {

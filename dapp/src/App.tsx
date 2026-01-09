@@ -1,18 +1,35 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ethers } from "ethers";
 import { ADDRESSES } from "./contracts/addresses";
 import { tokenAbi } from "./contracts/tokenAbi";
 import { crowdAbi } from "./contracts/crowdAbi";
 import { sponsorAbi } from "./contracts/sponsorAbi";
 import { distributeAbi } from "./contracts/distributeAbi";
+import { factoryAbi } from "./contracts/factoryAbi";
 import TokenPage from "./TokenPage";
 
 type Page = "main" | "token";
+
+interface Campaign {
+  address: string;
+  name?: string;
+}
+
+const CAMPAIGNS_STORAGE_KEY = "crowdfunding_campaigns";
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("main");
   const [account, setAccount] = useState<string>("");
   const [ethBalance, setEthBalance] = useState<string>("");
+
+  // Campaign management
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [selectedCampaign, setSelectedCampaign] = useState<string>("");
+  const [viewingCampaign, setViewingCampaign] = useState<string>(""); // Campaign being viewed
+  const [newCampaignAddress, setNewCampaignAddress] = useState<string>("");
+  const [factoryAddress, setFactoryAddress] = useState<string>(ADDRESSES.factory || "");
+  const [newCampaignGoal, setNewCampaignGoal] = useState<string>("");
+  const [creatingCampaign, setCreatingCampaign] = useState(false);
 
   // Token
   const [tokenSymbol, setTokenSymbol] = useState<string>("EDU");
@@ -58,6 +75,42 @@ function App() {
   const [totalWeightBps, setTotalWeightBps] = useState<string>("0");
   const [benCount, setBenCount] = useState<string>("0");
 
+  // Load campaigns from localStorage on mount
+  useEffect(() => {
+    const stored = localStorage.getItem(CAMPAIGNS_STORAGE_KEY);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as Campaign[];
+        setCampaigns(parsed);
+        // If there's a default campaign in ADDRESSES, add it if not present
+        if (ADDRESSES.crowd && !parsed.find(c => c.address.toLowerCase() === ADDRESSES.crowd.toLowerCase())) {
+          const defaultCampaigns = [{ address: ADDRESSES.crowd, name: "Default Campaign" }, ...parsed];
+          setCampaigns(defaultCampaigns);
+          setSelectedCampaign(ADDRESSES.crowd);
+          localStorage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(defaultCampaigns));
+        } else if (parsed.length > 0 && !selectedCampaign) {
+          setSelectedCampaign(parsed[0].address);
+        }
+      } catch (e) {
+        console.error("Failed to load campaigns from storage", e);
+      }
+    } else {
+      // Initialize with default campaign if available
+      if (ADDRESSES.crowd) {
+        const defaultCampaigns = [{ address: ADDRESSES.crowd, name: "Default Campaign" }];
+        setCampaigns(defaultCampaigns);
+        setSelectedCampaign(ADDRESSES.crowd);
+        localStorage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(defaultCampaigns));
+      }
+    }
+  }, []);
+
+  // Save campaigns to localStorage whenever they change
+  useEffect(() => {
+    if (campaigns.length > 0) {
+      localStorage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(campaigns));
+    }
+  }, [campaigns]);
 
   function getErrorMessage(err: unknown): string {
     if (err instanceof Error) return err.message;
@@ -94,9 +147,10 @@ function App() {
     }
   }
 
-  async function refreshAll(addr?: string) {
+  async function refreshAll(addr?: string, campaignAddr?: string) {
     const user = addr ?? account;
-    if (!user) return;
+    const campaign = campaignAddr ?? selectedCampaign ?? viewingCampaign;
+    if (!user || !campaign) return;
 
     try {
       setLoading(true);
@@ -123,8 +177,8 @@ function App() {
       const pricePerTokenWei = BigInt(ppu) * (BigInt(10) ** BigInt(decimals));
       setPricePerToken(ethers.formatEther(pricePerTokenWei));
 
-      // CrowdFunding (read-only)
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, provider);
+      // CrowdFunding (read-only) - use campaign parameter or selected/viewing campaign
+      const crowd = new ethers.Contract(campaign, crowdAbi, provider);
 
       const [stateStr, goal, total, mine, ownerAddr] = await Promise.all([
         crowd.getStateString(),
@@ -166,9 +220,108 @@ function App() {
     }
   }
 
+  function addCampaign(address: string, name?: string) {
+    if (!ethers.isAddress(address)) {
+      alert("Invalid address");
+      return;
+    }
+    const normalized = address.toLowerCase();
+    if (campaigns.find(c => c.address.toLowerCase() === normalized)) {
+      alert("Campaign already exists");
+      return;
+    }
+    const newCampaigns = [...campaigns, { address: normalized, name: name || `Campaign ${campaigns.length + 1}` }];
+    setCampaigns(newCampaigns);
+    setNewCampaignAddress("");
+  }
+
+  function viewCampaign(address: string) {
+    setViewingCampaign(address);
+    setSelectedCampaign(address); // Also set as selected for operations
+    refreshAll(account, address);
+  }
+
+  function closeCampaignView() {
+    setViewingCampaign("");
+    // Keep selectedCampaign for operations, but clear viewing state
+  }
+
+  function removeCampaign(address: string) {
+    const newCampaigns = campaigns.filter(c => c.address.toLowerCase() !== address.toLowerCase());
+    setCampaigns(newCampaigns);
+    if (selectedCampaign.toLowerCase() === address.toLowerCase()) {
+      setSelectedCampaign(newCampaigns.length > 0 ? newCampaigns[0].address : "");
+    }
+  }
+
+  async function createCampaignViaFactory() {
+    if (!factoryAddress || !ethers.isAddress(factoryAddress)) {
+      alert("Invalid factory address");
+      return;
+    }
+    if (!newCampaignGoal || Number(newCampaignGoal) <= 0) {
+      alert("Invalid funding goal");
+      return;
+    }
+
+    try {
+      setCreatingCampaign(true);
+      const provider = await getProvider();
+      const signer = await provider.getSigner();
+      const factory = new ethers.Contract(factoryAddress, factoryAbi, signer);
+
+      const goalUnits = ethers.parseUnits(newCampaignGoal, tokenDecimals);
+      const tx = await factory.createCampaign(
+        ADDRESSES.token,
+        goalUnits,
+        ADDRESSES.sponsor,
+        ADDRESSES.distribute
+      );
+      const receipt = await tx.wait();
+
+      // Find the CampaignCreated event
+      const event = receipt.logs.find((log: any) => {
+        try {
+          const parsed = factory.interface.parseLog(log);
+          return parsed?.name === "CampaignCreated";
+        } catch {
+          return false;
+        }
+      });
+
+      if (event) {
+        const parsed = factory.interface.parseLog(event);
+        const campaignAddress = parsed?.args[0];
+        if (campaignAddress) {
+          addCampaign(campaignAddress, `Campaign ${campaigns.length + 1}`);
+          setNewCampaignGoal("");
+          alert(`Campaign created: ${campaignAddress}`);
+        }
+      } else {
+        // Fallback: query the factory for the latest campaign
+        const allCampaigns = await factory.getAllCampaigns();
+        if (allCampaigns.length > 0) {
+          const newAddress = allCampaigns[allCampaigns.length - 1];
+          addCampaign(newAddress, `Campaign ${campaigns.length + 1}`);
+          setNewCampaignGoal("");
+          alert(`Campaign created: ${newAddress}`);
+        }
+      }
+    } catch (err: unknown) {
+      console.error(err);
+      alert(getErrorMessage(err));
+    } finally {
+      setCreatingCampaign(false);
+    }
+  }
+
 
 
   async function approveCrowd() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!approveAmount || Number(approveAmount) <= 0) {
       alert("Introdu o suma valida pentru approve");
       return;
@@ -183,7 +336,7 @@ function App() {
       const token = new ethers.Contract(ADDRESSES.token, tokenAbi, signer);
 
       const amountUnits = ethers.parseUnits(approveAmount, tokenDecimals);
-      const tx = await token.approve(ADDRESSES.crowd, amountUnits);
+      const tx = await token.approve(selectedCampaign, amountUnits);
       await tx.wait();
 
       await refreshAll();
@@ -197,6 +350,10 @@ function App() {
   }
 
   async function contribute() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!contributeAmount || Number(contributeAmount) <= 0) {
       alert("Introdu o suma valida pentru contribute");
       return;
@@ -209,7 +366,7 @@ function App() {
       const signer = await provider.getSigner();
 
       const token = new ethers.Contract(ADDRESSES.token, tokenAbi, signer);
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       // 1) verifica starea inainte (mesaj corect pentru profesor)
       const stateStr: string = await crowd.getStateString();
@@ -220,7 +377,7 @@ function App() {
 
       // 2) allowance dupa (doar daca e permis sa contribui)
       const amountUnits = ethers.parseUnits(contributeAmount, tokenDecimals);
-      const allowance: bigint = await token.allowance(account, ADDRESSES.crowd);
+      const allowance: bigint = await token.allowance(account, selectedCampaign);
 
       if (allowance < amountUnits) {
         alert("Allowance insuficient. Fa approve inainte (sau mareste approve).");
@@ -245,6 +402,10 @@ function App() {
   }
 
   async function withdraw() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!withdrawAmount || Number(withdrawAmount) <= 0) {
       alert("Introdu o suma valida pentru withdraw");
       return;
@@ -255,7 +416,7 @@ function App() {
 
       const provider = await getProvider();
       const signer = await provider.getSigner();
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       // verifica starea inainte (altfel MetaMask arata erori urate)
       const stateStr: string = await crowd.getStateString();
@@ -318,6 +479,10 @@ function App() {
   }
 
   async function requestSponsorship() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!isOwner) {
       alert("Doar owner poate cere sponsorizare");
       return;
@@ -328,7 +493,7 @@ function App() {
 
       const provider = await getProvider();
       const signer = await provider.getSigner();
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       const tx = await crowd.requestSponsorship();
       await tx.wait();
@@ -343,6 +508,10 @@ function App() {
   }
 
   async function transferToDistribute() {
+    if (!selectedCampaign) {
+      alert("Please select a campaign first");
+      return;
+    }
     if (!isOwner) {
       alert("Doar owner poate transfera catre distributie");
       return;
@@ -353,7 +522,7 @@ function App() {
 
       const provider = await getProvider();
       const signer = await provider.getSigner();
-      const crowd = new ethers.Contract(ADDRESSES.crowd, crowdAbi, signer);
+      const crowd = new ethers.Contract(selectedCampaign, crowdAbi, signer);
 
       const tx = await crowd.transferToDistribute();
       await tx.wait();
@@ -528,128 +697,501 @@ function App() {
 
           <hr style={{ margin: "24px 0" }} />
 
-          <h2>CrowdFunding</h2>
-          <p><b>State:</b> {cfState}</p>
-          <p><b>Goal:</b> {cfGoal} {tokenSymbol}</p>
-          <p><b>Total collected:</b> {cfTotal} {tokenSymbol}</p>
-          <p><b>My contribution:</b> {myContribution} {tokenSymbol}</p>
-
-          <h3>1) Approve token pentru CrowdFunding</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={approveAmount}
-              onChange={(e) => setApproveAmount(e.target.value)}
-              placeholder="Approve amount (e.g. 100)"
-              style={{ padding: 8, width: 260 }}
-            />
-            <button onClick={approveCrowd} disabled={approving}>
-              {approving ? "Approving..." : "Approve"}
-            </button>
+          <h2>Campaign Management</h2>
+          <div style={{ marginBottom: "1rem" }}>
+            <label style={{ display: "block", marginBottom: "0.5rem" }}>
+              <b>Select Campaign:</b>
+            </label>
+            <select
+              value={selectedCampaign}
+              onChange={(e) => setSelectedCampaign(e.target.value)}
+              style={{ padding: "8px", minWidth: "400px", marginBottom: "1rem" }}
+            >
+              {campaigns.length === 0 ? (
+                <option value="">No campaigns available</option>
+              ) : (
+                campaigns.map((campaign) => (
+                  <option key={campaign.address} value={campaign.address}>
+                    {campaign.name || campaign.address} ({campaign.address.slice(0, 10)}...)
+                  </option>
+                ))
+              )}
+            </select>
           </div>
 
-          <h3 style={{ marginTop: 16 }}>2) Contribute</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={contributeAmount}
-              onChange={(e) => setContributeAmount(e.target.value)}
-              placeholder="Contribute amount (e.g. 50)"
-              style={{ padding: 8, width: 260 }}
-            />
-            <button onClick={contribute} disabled={contributing}>
-              {contributing ? "Contributing..." : "Contribute"}
-            </button>
+          <div style={{ marginBottom: "1rem", padding: "1rem", border: "1px solid #555", borderRadius: "4px", backgroundColor: "#2d2d2d", color: "#ffffff" }}>
+            <h3 style={{ marginTop: 0, color: "#ffffff" }}>Add Campaign</h3>
+            <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "1rem" }}>
+              <input
+                value={newCampaignAddress}
+                onChange={(e) => setNewCampaignAddress(e.target.value)}
+                placeholder="Campaign address (0x...)"
+                style={{ 
+                  padding: 8, 
+                  width: "400px", 
+                  backgroundColor: "#1a1a1a",
+                  color: "#ffffff",
+                  border: "1px solid #555",
+                  borderRadius: "4px"
+                }}
+              />
+              <button
+                onClick={() => addCampaign(newCampaignAddress)}
+                disabled={!newCampaignAddress}
+              >
+                Add Campaign
+              </button>
+            </div>
+
+            <div style={{ marginTop: "1rem" }}>
+              <h4 style={{ color: "#ffffff" }}>Or Create New Campaign via Factory</h4>
+              <p style={{ fontSize: "0.9em", color: "#b0b0b0", marginBottom: "0.5rem" }}>
+                Adresa Factory se obține după deploy: <code style={{ backgroundColor: "#1a1a1a", padding: "2px 6px", borderRadius: "3px", color: "#4caf50" }}>npx hardhat run scripts/deploy.ts --network localhost</code>
+              </p>
+              <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+                <input
+                  value={factoryAddress}
+                  onChange={(e) => setFactoryAddress(e.target.value)}
+                  placeholder="Factory contract address (0x...) - vezi output deploy"
+                  style={{ 
+                    padding: 8, 
+                    width: "400px",
+                    backgroundColor: "#1a1a1a",
+                    color: "#ffffff",
+                    border: "1px solid #555",
+                    borderRadius: "4px"
+                  }}
+                />
+              </div>
+              <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                <input
+                  value={newCampaignGoal}
+                  onChange={(e) => setNewCampaignGoal(e.target.value)}
+                  placeholder="Funding goal (e.g. 1000)"
+                  style={{ 
+                    padding: 8, 
+                    width: "200px",
+                    backgroundColor: "#1a1a1a",
+                    color: "#ffffff",
+                    border: "1px solid #555",
+                    borderRadius: "4px"
+                  }}
+                />
+                <button
+                  onClick={createCampaignViaFactory}
+                  disabled={!factoryAddress || !newCampaignGoal || creatingCampaign}
+                >
+                  {creatingCampaign ? "Creating..." : "Create Campaign"}
+                </button>
+              </div>
+            </div>
           </div>
 
-          <h3 style={{ marginTop: 16 }}>3) Withdraw (doar NEFINANTAT)</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={withdrawAmount}
-              onChange={(e) => setWithdrawAmount(e.target.value)}
-              placeholder="Withdraw amount (e.g. 10)"
-              style={{ padding: 8, width: 260 }}
-            />
-            <button onClick={withdraw} disabled={withdrawing}>
-              {withdrawing ? "Withdrawing..." : "Withdraw"}
-            </button>
-          </div>
+          {campaigns.length > 0 && (
+            <div style={{ marginBottom: "1rem" }}>
+              <h3>Campaigns List</h3>
+              <ul style={{ listStyle: "none", padding: 0 }}>
+                {campaigns.map((campaign) => (
+                  <li
+                    key={campaign.address}
+                    style={{
+                      padding: "0.75rem",
+                      marginBottom: "0.75rem",
+                      backgroundColor: viewingCampaign.toLowerCase() === campaign.address.toLowerCase() ? "#0d47a1" : "#1a1a1a",
+                      color: "#ffffff",
+                      borderRadius: "6px",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      boxShadow: "0 2px 4px rgba(0,0,0,0.3)",
+                    }}
+                  >
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: "bold", marginBottom: "0.25rem" }}>
+                        {campaign.name || "Unnamed Campaign"}
+                      </div>
+                      <div style={{ fontSize: "0.85em", opacity: 0.9 }}>
+                        {campaign.address.slice(0, 10)}...{campaign.address.slice(-8)}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                      <button
+                        onClick={() => viewCampaign(campaign.address)}
+                        style={{
+                          padding: "6px 12px",
+                          fontSize: "0.9em",
+                          backgroundColor: viewingCampaign.toLowerCase() === campaign.address.toLowerCase() ? "#0d47a1" : "#1976d2",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {viewingCampaign.toLowerCase() === campaign.address.toLowerCase() ? "Viewing" : "View Campaign"}
+                      </button>
+                      <button
+                        onClick={() => removeCampaign(campaign.address)}
+                        style={{
+                          padding: "6px 12px",
+                          fontSize: "0.9em",
+                          backgroundColor: "#d32f2f",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
-        <hr style={{ margin: "24px 0" }} />
-        <h2>Owner actions</h2>
-        <p><b>Crowd owner:</b> {cfOwner}</p>
-        <p><b>You are owner:</b> {isOwner ? "YES" : "NO"}</p>
+          {viewingCampaign && (
+            <>
+              <hr style={{ margin: "24px 0" }} />
+              <div
+                style={{
+                  backgroundColor: "#1e1e1e",
+                  padding: "1.5rem",
+                  borderRadius: "8px",
+                  border: "2px solid #1565c0",
+                  marginBottom: "1.5rem",
+                  color: "#ffffff",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                  <h2 style={{ margin: 0, color: "#ffffff" }}>Campaign Details</h2>
+                  <button
+                    onClick={closeCampaignView}
+                    style={{
+                      padding: "6px 12px",
+                      backgroundColor: "#616161",
+                      color: "#ffffff",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Close
+                  </button>
+                </div>
 
-        <div style={{ opacity: isOwner ? 1 : 0.5 }}>
-          <h3>0) Add Beneficiary (DistributeFunding)</h3>
-          <p>
-            <b>Beneficiaries:</b> {benCount}{" "}
-            {totalWeightBps !== "N/A" && (
-              <>
-                | <b>Total weight (bps):</b> {totalWeightBps} / 10000
-              </>
-            )}
-          </p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: "1rem", marginBottom: "1.5rem" }}>
+                  <div style={{ backgroundColor: "#2d2d2d", padding: "1rem", borderRadius: "6px", border: "1px solid #404040" }}>
+                    <div style={{ fontSize: "0.9em", color: "#b0b0b0", marginBottom: "0.25rem" }}>Campaign Address</div>
+                    <div style={{ fontWeight: "bold", wordBreak: "break-all", color: "#ffffff" }}>{viewingCampaign}</div>
+                  </div>
+                  <div style={{ backgroundColor: "#2d2d2d", padding: "1rem", borderRadius: "6px", border: "1px solid #404040" }}>
+                    <div style={{ fontSize: "0.9em", color: "#b0b0b0", marginBottom: "0.25rem" }}>State</div>
+                    <div style={{ fontWeight: "bold", color: cfState === "nefinantat" ? "#ff9800" : cfState === "prefinantat" ? "#42a5f5" : "#66bb6a" }}>
+                      {cfState}
+                    </div>
+                  </div>
+                  <div style={{ backgroundColor: "#2d2d2d", padding: "1rem", borderRadius: "6px", border: "1px solid #404040" }}>
+                    <div style={{ fontSize: "0.9em", color: "#b0b0b0", marginBottom: "0.25rem" }}>Funding Goal</div>
+                    <div style={{ fontWeight: "bold", color: "#ffffff" }}>{cfGoal} {tokenSymbol}</div>
+                  </div>
+                  <div style={{ backgroundColor: "#2d2d2d", padding: "1rem", borderRadius: "6px", border: "1px solid #404040" }}>
+                    <div style={{ fontSize: "0.9em", color: "#b0b0b0", marginBottom: "0.25rem" }}>Total Collected</div>
+                    <div style={{ fontWeight: "bold", color: "#ffffff" }}>{cfTotal} {tokenSymbol}</div>
+                  </div>
+                  <div style={{ backgroundColor: "#2d2d2d", padding: "1rem", borderRadius: "6px", border: "1px solid #404040" }}>
+                    <div style={{ fontSize: "0.9em", color: "#b0b0b0", marginBottom: "0.25rem" }}>My Contribution</div>
+                    <div style={{ fontWeight: "bold", color: "#ffffff" }}>{myContribution} {tokenSymbol}</div>
+                  </div>
+                </div>
 
-          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <input
-              value={benAddress}
-              onChange={(e) => setBenAddress(e.target.value)}
-              placeholder="Beneficiary address (0x...)"
-              style={{ padding: 8, width: 420 }}
-              disabled={!isOwner}
-            />
-            <input
-              value={benWeight}
-              onChange={(e) => setBenWeight(e.target.value)}
-              placeholder="weightBps (ex 6000 = 60%)"
-              style={{ padding: 8, width: 220 }}
-              disabled={!isOwner}
-            />
-            <button onClick={addBeneficiary} disabled={!isOwner || addingBen}>
-              {addingBen ? "Adding..." : "Add Beneficiary"}
-            </button>
-          </div>
-          <h3>1) Buy Sponsor Tokens</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              value={sponsorBuyAmount}
-              onChange={(e) => setSponsorBuyAmount(e.target.value)}
-              placeholder="Sponsor buy amount (e.g. 200)"
-              style={{ padding: 8, width: 260 }}
-              disabled={!isOwner}
-            />
-            <button onClick={buySponsorTokens} disabled={!isOwner || buyingSponsor}>
-              {buyingSponsor ? "Buying..." : "Buy for SponsorFunding"}
-            </button>
-          </div>
+                <div style={{ marginTop: "1.5rem", backgroundColor: "#2d2d2d", padding: "1.5rem", borderRadius: "8px" }}>
+                  <h3 style={{ marginTop: 0, marginBottom: "1rem", color: "#ffffff" }}>Campaign Actions</h3>
+                  <div style={{ marginBottom: "1rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: "500", color: "#ffffff" }}>
+                      1) Approve tokens for this campaign
+                    </label>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <input
+                        value={approveAmount}
+                        onChange={(e) => setApproveAmount(e.target.value)}
+                        placeholder="Approve amount (e.g. 100)"
+                        style={{ 
+                          padding: 8, 
+                          width: 260, 
+                          borderRadius: "4px", 
+                          border: "1px solid #555", 
+                          backgroundColor: "#1a1a1a",
+                          color: "#ffffff"
+                        }}
+                      />
+                      <button
+                        onClick={approveCrowd}
+                        disabled={approving || !viewingCampaign}
+                        style={{
+                          padding: "8px 16px",
+                          backgroundColor: "#1976d2",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: approving ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {approving ? "Approving..." : "Approve"}
+                      </button>
+                    </div>
+                  </div>
 
-          <h3 style={{ marginTop: 16 }}>2) Request Sponsorship</h3>
-          <button onClick={requestSponsorship} disabled={!isOwner || requestingSponsor}>
-            {requestingSponsor ? "Requesting..." : "requestSponsorship()"}
-          </button>
+                  <div style={{ marginBottom: "1rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: "500", color: "#ffffff" }}>
+                      2) Contribute to this campaign
+                    </label>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <input
+                        value={contributeAmount}
+                        onChange={(e) => setContributeAmount(e.target.value)}
+                        placeholder="Contribute amount (e.g. 50)"
+                        style={{ 
+                          padding: 8, 
+                          width: 260, 
+                          borderRadius: "4px", 
+                          border: "1px solid #555", 
+                          backgroundColor: "#1a1a1a",
+                          color: "#ffffff"
+                        }}
+                      />
+                      <button
+                        onClick={contribute}
+                        disabled={contributing || !viewingCampaign}
+                        style={{
+                          padding: "8px 16px",
+                          backgroundColor: "#388e3c",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: contributing ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {contributing ? "Contributing..." : "Contribute"}
+                      </button>
+                    </div>
+                  </div>
 
-          <h3 style={{ marginTop: 16 }}>3) Transfer To Distribute</h3>
-          <button onClick={transferToDistribute} disabled={!isOwner || transferringDist}>
-            {transferringDist ? "Transferring..." : "transferToDistribute()"}
-          </button>
-        </div>
-        
-        
-        <hr style={{ margin: "24px 0" }} />
+                  <div style={{ marginBottom: "1rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: "500", color: "#ffffff" }}>
+                      3) Withdraw from this campaign (only if NEFINANTAT)
+                    </label>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <input
+                        value={withdrawAmount}
+                        onChange={(e) => setWithdrawAmount(e.target.value)}
+                        placeholder="Withdraw amount (e.g. 10)"
+                        style={{ 
+                          padding: 8, 
+                          width: 260, 
+                          borderRadius: "4px", 
+                          border: "1px solid #555", 
+                          backgroundColor: "#1a1a1a",
+                          color: "#ffffff"
+                        }}
+                      />
+                      <button
+                        onClick={withdraw}
+                        disabled={withdrawing || !viewingCampaign}
+                        style={{
+                          padding: "8px 16px",
+                          backgroundColor: "#f57c00",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: withdrawing ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {withdrawing ? "Withdrawing..." : "Withdraw"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
 
-        <h2>Beneficiary actions</h2>
+              <hr style={{ margin: "24px 0" }} />
+              <div
+                style={{
+                  backgroundColor: "#2d2d2d",
+                  padding: "1.5rem",
+                  borderRadius: "8px",
+                  border: "1px solid #ff9800",
+                  color: "#ffffff",
+                }}
+              >
+              <h2 style={{ marginTop: 0, color: "#ffffff" }}>Owner Actions</h2>
+              <div style={{ marginBottom: "1rem" }}>
+                <p style={{ color: "#ffffff" }}><b>Crowd owner:</b> {cfOwner}</p>
+                <p style={{ color: "#ffffff" }}><b>You are owner:</b> {isOwner ? "✅ YES" : "❌ NO"}</p>
+              </div>
 
-        <button onClick={claim}>
-          claim()
-        </button>
+              <div style={{ opacity: isOwner ? 1 : 0.5 }}>
+                <div style={{ marginBottom: "1.5rem" }}>
+                  <h3 style={{ marginTop: 0, marginBottom: "0.5rem", color: "#ffffff" }}>0) Add Beneficiary (DistributeFunding)</h3>
+                  <p style={{ marginBottom: "0.75rem", fontSize: "0.9em", color: "#b0b0b0" }}>
+                    <b style={{ color: "#ffffff" }}>Beneficiaries:</b> {benCount}{" "}
+                    {totalWeightBps !== "N/A" && (
+                      <>
+                        | <b style={{ color: "#ffffff" }}>Total weight (bps):</b> {totalWeightBps} / 10000
+                      </>
+                    )}
+                  </p>
 
-        <p style={{ opacity: 0.7 }}>
-          (doar beneficiarii pot apela claim o singura data)
-        </p>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                    <input
+                      value={benAddress}
+                      onChange={(e) => setBenAddress(e.target.value)}
+                      placeholder="Beneficiary address (0x...)"
+                      style={{ 
+                        padding: 8, 
+                        width: 420, 
+                        borderRadius: "4px", 
+                        border: "1px solid #555", 
+                        backgroundColor: "#1a1a1a",
+                        color: "#ffffff"
+                      }}
+                      disabled={!isOwner}
+                    />
+                    <input
+                      value={benWeight}
+                      onChange={(e) => setBenWeight(e.target.value)}
+                      placeholder="weightBps (ex 6000 = 60%)"
+                      style={{ 
+                        padding: 8, 
+                        width: 220, 
+                        borderRadius: "4px", 
+                        border: "1px solid #555", 
+                        backgroundColor: "#1a1a1a",
+                        color: "#ffffff"
+                      }}
+                      disabled={!isOwner}
+                    />
+                    <button
+                      onClick={addBeneficiary}
+                      disabled={!isOwner || addingBen}
+                      style={{
+                        padding: "8px 16px",
+                        backgroundColor: "#7b1fa2",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "4px",
+                        cursor: (!isOwner || addingBen) ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      {addingBen ? "Adding..." : "Add Beneficiary"}
+                    </button>
+                  </div>
+                </div>
 
+                <div style={{ marginBottom: "1.5rem" }}>
+                  <h3 style={{ marginTop: 0, marginBottom: "0.5rem", color: "#ffffff" }}>1) Buy Sponsor Tokens</h3>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                    <input
+                      value={sponsorBuyAmount}
+                      onChange={(e) => setSponsorBuyAmount(e.target.value)}
+                      placeholder="Sponsor buy amount (e.g. 200)"
+                      style={{ 
+                        padding: 8, 
+                        width: 260, 
+                        borderRadius: "4px", 
+                        border: "1px solid #555", 
+                        backgroundColor: "#1a1a1a",
+                        color: "#ffffff"
+                      }}
+                      disabled={!isOwner}
+                    />
+                    <button
+                      onClick={buySponsorTokens}
+                      disabled={!isOwner || buyingSponsor}
+                      style={{
+                        padding: "8px 16px",
+                        backgroundColor: "#0288d1",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: "4px",
+                        cursor: (!isOwner || buyingSponsor) ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      {buyingSponsor ? "Buying..." : "Buy for SponsorFunding"}
+                    </button>
+                  </div>
+                </div>
 
-          <p style={{ marginTop: 12, opacity: 0.8 }}>
-            CrowdFunding contract: {ADDRESSES.crowd}
-          </p>
+                <div style={{ marginBottom: "1.5rem" }}>
+                  <h3 style={{ marginTop: 0, marginBottom: "0.5rem", color: "#ffffff" }}>2) Request Sponsorship</h3>
+                  <button
+                    onClick={requestSponsorship}
+                    disabled={!isOwner || requestingSponsor}
+                    style={{
+                      padding: "8px 16px",
+                      backgroundColor: "#5c6bc0",
+                      color: "#ffffff",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: (!isOwner || requestingSponsor) ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {requestingSponsor ? "Requesting..." : "Request Sponsorship"}
+                  </button>
+                </div>
+
+                <div style={{ marginBottom: "1.5rem" }}>
+                  <h3 style={{ marginTop: 0, marginBottom: "0.5rem", color: "#ffffff" }}>3) Transfer To Distribute</h3>
+                  <button
+                    onClick={transferToDistribute}
+                    disabled={!isOwner || transferringDist || !viewingCampaign}
+                    style={{
+                      padding: "8px 16px",
+                      backgroundColor: "#c62828",
+                      color: "#ffffff",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: (!isOwner || transferringDist || !viewingCampaign) ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {transferringDist ? "Transferring..." : "Transfer To Distribute"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <hr style={{ margin: "24px 0" }} />
+              <div
+                style={{
+                  backgroundColor: "#1b5e20",
+                  padding: "1.5rem",
+                  borderRadius: "8px",
+                  border: "1px solid #4caf50",
+                  color: "#ffffff",
+                }}
+              >
+                <h2 style={{ marginTop: 0, color: "#ffffff" }}>Beneficiary Actions</h2>
+                <button
+                  onClick={claim}
+                  style={{
+                    padding: "10px 20px",
+                    backgroundColor: "#4caf50",
+                    color: "#ffffff",
+                    border: "none",
+                    borderRadius: "4px",
+                    fontSize: "1em",
+                    cursor: "pointer",
+                    fontWeight: "bold",
+                  }}
+                >
+                  Claim Funds
+                </button>
+                <p style={{ marginTop: "0.5rem", color: "#c8e6c9", fontSize: "0.9em" }}>
+                  (Only beneficiaries can claim, and only once)
+                </p>
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
