@@ -12,7 +12,7 @@ interface IBuyableToken {
  * SponsorFunding:
  * - tine tokenuri pentru sponsorizare
  * - procent fix (ex: 10 = 10%)
- * - cumpara tokenuri din contractul token (owner only)
+ * - portofel independent, oricine poate cumpara tokenuri pentru sponsorizare
  * - este apelat de CrowdFunding cand colectarea s-a incheiat
  */
 contract SponsorFunding is Ownable {
@@ -30,10 +30,11 @@ contract SponsorFunding is Ownable {
     }
 
     /**
-     * Owner al SponsorFunding cumpara tokenuri pentru sponsorizari.
+     * Orice adresa poate cumpara tokenuri pentru sponsorizari.
+     * SponsorFunding este un portofel independent, fara restrictii de ownership.
      * Tokenul trebuie sa aiba buyTokens(uint256) payable.
      */
-    function buySponsorTokens(uint256 tokenAmount) external payable onlyOwner {
+    function buySponsorTokens(uint256 tokenAmount) external payable {
         require(tokenAmount > 0, "amount=0");
         IBuyableToken(address(token)).buyTokens{value: msg.value}(tokenAmount);
         emit SponsorBoughtTokens(tokenAmount, msg.value);

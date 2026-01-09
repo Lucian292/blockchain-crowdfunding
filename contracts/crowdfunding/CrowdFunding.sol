@@ -47,8 +47,9 @@ contract CrowdFunding is Ownable, ReentrancyGuard {
         address token_,
         uint256 fundingGoal_,
         address sponsorFunding_,
-        address distributeFunding_
-    ) Ownable(msg.sender) {
+        address distributeFunding_,
+        address owner_
+    ) Ownable(owner_ != address(0) ? owner_ : msg.sender) {
         require(token_ != address(0), "token=0");
         require(fundingGoal_ > 0, "goal=0");
 

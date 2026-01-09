@@ -38,7 +38,8 @@ contract CampaignFactory {
             token_,
             fundingGoal_,
             sponsorFunding_,
-            distributeFunding_
+            distributeFunding_,
+            msg.sender  // Pass the caller as the owner
         );
 
         address campaignAddress = address(campaign);

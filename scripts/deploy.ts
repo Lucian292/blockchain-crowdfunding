@@ -1,4 +1,6 @@
 import { network } from "hardhat";
+import { writeFileSync } from "fs";
+import { join } from "path";
 
 async function main() {
   const { ethers } = await network.connect(); // <-- asta e cheia in Hardhat 3
@@ -30,7 +32,8 @@ async function main() {
     await token.getAddress(),
     goal,
     await sponsor.getAddress(),
-    await dist.getAddress()
+    await dist.getAddress(),
+    deployer.address  // Owner is the deployer
   );
   await crowd.waitForDeployment();
 
@@ -42,12 +45,34 @@ async function main() {
   const factory = await Factory.deploy();
   await factory.waitForDeployment();
 
+  // Get all addresses
+  const tokenAddress = await token.getAddress();
+  const sponsorAddress = await sponsor.getAddress();
+  const distAddress = await dist.getAddress();
+  const crowdAddress = await crowd.getAddress();
+  const factoryAddress = await factory.getAddress();
+
   console.log("Deployer:", deployer.address);
-  console.log("Token:", await token.getAddress());
-  console.log("SponsorFunding:", await sponsor.getAddress());
-  console.log("DistributeFunding:", await dist.getAddress());
-  console.log("CrowdFunding:", await crowd.getAddress());
-  console.log("CampaignFactory:", await factory.getAddress());
+  console.log("Token:", tokenAddress);
+  console.log("SponsorFunding:", sponsorAddress);
+  console.log("DistributeFunding:", distAddress);
+  console.log("CrowdFunding:", crowdAddress);
+  console.log("CampaignFactory:", factoryAddress);
+
+  // Update addresses.ts file
+  const addressesContent = `export const ADDRESSES = {
+  token: "${tokenAddress}",
+  sponsor: "${sponsorAddress}",
+  distribute: "${distAddress}",
+  crowd: "${crowdAddress}",
+  factory: "${factoryAddress}",
+} as const;
+`;
+
+  const addressesPath = join(process.cwd(), "dapp/src/contracts/addresses.ts");
+  writeFileSync(addressesPath, addressesContent, "utf-8");
+  
+  console.log("\n✅ Addresses updated in dapp/src/contracts/addresses.ts");
 }
 
 main().catch((err) => {
