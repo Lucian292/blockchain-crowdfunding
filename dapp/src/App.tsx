@@ -1135,17 +1135,22 @@ function App() {
       
       // Check if this campaign is set in DistributeFunding (required for notifyFundsReceived)
       const distCrowdFunding = await dist.crowdFunding();
-      if (distCrowdFunding.toLowerCase() !== campaignAddress.toLowerCase() && distCrowdFunding !== ethers.ZeroAddress) {
+      if (distCrowdFunding.toLowerCase() !== campaignAddress.toLowerCase()) {
         // Need to set this campaign in DistributeFunding
-        const signer = await provider.getSigner();
+        // Use setCrowdFundingForCampaign which allows campaign owner to set it
         const distWithSigner = new ethers.Contract(ADDRESSES.distribute, distributeAbi, signer);
         try {
-          const setTx = await distWithSigner.setCrowdFunding(campaignAddress);
+          const setTx = await distWithSigner.setCrowdFundingForCampaign(campaignAddress);
           await setTx.wait();
           console.log(`Set DistributeFunding.crowdFunding to ${campaignAddress}`);
         } catch (setErr) {
           console.error("Failed to set crowdFunding:", setErr);
-          alert(`❌ Cannot set campaign in DistributeFunding. You may need to set it manually.\n\nError: ${setErr instanceof Error ? setErr.message : String(setErr)}`);
+          const errorMsg = getErrorMessage(setErr);
+          if (errorMsg.includes("0x118cdaa7") || errorMsg.includes("OwnableUnauthorizedAccount") || errorMsg.includes("not campaign owner")) {
+            alert(`❌ Cannot set campaign in DistributeFunding. You must be the owner of the campaign.\n\nYour address: ${signerAddress}\nCampaign: ${campaignAddress}\n\nPlease verify you are the owner of this campaign.`);
+          } else {
+            alert(`❌ Cannot set campaign in DistributeFunding. You may need to set it manually.\n\nError: ${errorMsg}`);
+          }
           return;
         }
       }
@@ -1220,18 +1225,42 @@ function App() {
       return;
     }
 
-    // Verify ownership
+    // Verify ownership of the campaign (not DistributeFunding contract)
+    // The DistributeFunding contract now allows either its owner OR the campaign owner to add beneficiaries
     try {
       const provider = await getProvider();
-      const crowd = new ethers.Contract(campaignAddress, crowdAbi, provider);
-      const owner = await crowd.owner();
       
-      if (account.toLowerCase() !== owner.toLowerCase()) {
-        alert("❌ Only the campaign owner can add beneficiaries.\n\nYou are not the owner of this campaign.");
+      // Validate campaign exists
+      if (!ethers.isAddress(campaignAddress)) {
+        throw new Error("Invalid campaign address");
+      }
+      
+      const campaignCode = await provider.getCode(campaignAddress);
+      if (campaignCode === "0x") {
+        throw new Error("Campaign contract does not exist. Please check the address or create a new campaign.");
+      }
+      
+      const crowd = new ethers.Contract(campaignAddress, crowdAbi, provider);
+      const campaignOwner = await crowd.owner();
+      
+      // Get signer address to compare
+      const signer = await provider.getSigner();
+      const signerAddress = await signer.getAddress();
+      
+      console.log("Add Beneficiary - Ownership check:", {
+        account: account.toLowerCase(),
+        signerAddress: signerAddress.toLowerCase(),
+        campaignOwner: campaignOwner.toLowerCase(),
+        match: signerAddress.toLowerCase() === campaignOwner.toLowerCase()
+      });
+      
+      if (signerAddress.toLowerCase() !== campaignOwner.toLowerCase()) {
+        alert(`❌ Only the campaign owner can add beneficiaries.\n\nYou are not the owner of this campaign.\n\nYour address: ${signerAddress}\nCampaign owner: ${campaignOwner}\n\nPlease make sure you are connected with the correct wallet.`);
         return;
       }
     } catch (err) {
-      alert("❌ Could not verify campaign ownership. Please try again.");
+      console.error("Ownership check error:", err);
+      alert(`❌ Could not verify campaign ownership. Please try again.\n\nError: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
 
@@ -1264,7 +1293,8 @@ function App() {
       const signer = await provider.getSigner();
       const dist = new ethers.Contract(ADDRESSES.distribute, distributeAbi, signer);
 
-      const tx = await dist.addBeneficiary(benAddress, w);
+      // Use addBeneficiaryForCampaign to verify ownership of the specific campaign
+      const tx = await dist.addBeneficiaryForCampaign(benAddress, w, campaignAddress);
       await tx.wait();
 
       await refreshAll(undefined, campaignAddress);
@@ -1278,13 +1308,22 @@ function App() {
       // User-friendly error messages
       if (errorMsg.includes("user rejected") || errorMsg.includes("denied")) {
         alert("Transaction was cancelled by user.");
-      } else if (errorMsg.includes("revert") || errorMsg.includes("execution reverted")) {
-        if (errorMsg.includes("total weight") || errorMsg.includes("exceeds")) {
-          alert("❌ Transaction failed. The total weight of all beneficiaries would exceed 100% (10000 basis points).\n\nPlease reduce the weight or remove existing beneficiaries first.");
-        } else if (errorMsg.includes("already exists") || errorMsg.includes("duplicate")) {
-          alert("❌ This beneficiary address is already added to the distribution list.");
+      } else if (errorMsg.includes("missing revert data") || errorMsg.includes("CALL_EXCEPTION") || errorMsg.includes("0x118cdaa7") || errorMsg.includes("OwnableUnauthorizedAccount")) {
+        // Check if it's an ownership error
+        if (errorMsg.includes("0x118cdaa7") || errorMsg.includes("OwnableUnauthorizedAccount")) {
+          alert(`❌ Ownership error. You are not the owner of the DistributeFunding contract.\n\nPlease verify:\n- You are connected with the correct wallet\n- You are the owner of DistributeFunding: ${ADDRESSES.distribute}\n\nTry refreshing the page and reconnecting your wallet.`);
         } else {
-          alert("❌ Transaction failed. The contract rejected the operation. Please check the beneficiary address and weight.");
+          alert(`❌ Cannot estimate gas for adding beneficiary. Possible causes:\n\n1. You are not the owner of the DistributeFunding contract\n2. Invalid beneficiary address\n3. Invalid weight value\n4. Total weight would exceed 100%\n\nPlease check:\n- DistributeFunding address: ${ADDRESSES.distribute}\n- Verify you are the contract owner`);
+        }
+      } else if (errorMsg.includes("revert") || errorMsg.includes("execution reverted")) {
+        if (errorMsg.includes("total weight") || errorMsg.includes("exceeds") || errorMsg.includes("> 100%")) {
+          alert("❌ Transaction failed. The total weight of all beneficiaries would exceed 100% (10000 basis points).\n\nPlease reduce the weight or remove existing beneficiaries first.");
+        } else if (errorMsg.includes("already exists") || errorMsg.includes("duplicate") || errorMsg.includes("exists")) {
+          alert("❌ This beneficiary address is already added to the distribution list.");
+        } else if (errorMsg.includes("who=0") || errorMsg.includes("bad weight")) {
+          alert("❌ Invalid beneficiary data. Please check:\n- Beneficiary address is valid\n- Weight is between 1 and 10000");
+        } else {
+          alert(`❌ Transaction failed. The contract rejected the operation.\n\nError: ${errorMsg}\n\nPlease check:\n- You are the owner of DistributeFunding\n- Beneficiary address is valid\n- Weight is valid`);
         }
       } else {
         alert(`❌ Error adding beneficiary: ${errorMsg}`);
