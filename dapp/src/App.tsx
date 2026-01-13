@@ -325,13 +325,13 @@ function App() {
       // DistributeFunding (read-only)
       const dist = new ethers.Contract(ADDRESSES.distribute, distributeAbi, provider);
 
-      // count e sigur
-      const count = await dist.beneficiariesCount();
+      // count per campaign - use the campaign address
+      const count = await dist.beneficiariesCount(campaign);
       setBenCount(count.toString());
 
-      // totalWeightBps poate sa nu existe in contract -> fallback N/A
+      // totalWeightBps per campaign - use the campaign address
       try {
-        const tw = await dist.totalWeightBps();
+        const tw = await dist.totalWeightBps(campaign);
         setTotalWeightBps(tw.toString());
       } catch {
         setTotalWeightBps("N/A");
@@ -1125,11 +1125,11 @@ function App() {
         throw new Error("DistributeFunding contract does not exist. Please redeploy contracts.");
       }
       
-      // Check if DistributeFunding has beneficiaries (required for notifyFundsReceived)
+      // Check if DistributeFunding has beneficiaries for this campaign (required for notifyFundsReceived)
       const dist = new ethers.Contract(ADDRESSES.distribute, distributeAbi, provider);
-      const beneficiariesCount = await dist.beneficiariesCount();
+      const beneficiariesCount = await dist.beneficiariesCount(campaignAddress);
       if (beneficiariesCount === 0n) {
-        alert("❌ Cannot transfer to distribution. No beneficiaries have been added to DistributeFunding.\n\nPlease add at least one beneficiary before transferring funds.");
+        alert("❌ Cannot transfer to distribution. No beneficiaries have been added for this campaign.\n\nPlease add at least one beneficiary for this campaign before transferring funds.");
         return;
       }
       
@@ -1362,6 +1362,14 @@ function App() {
 
 
   async function claim() {
+    // Use viewingCampaign if available, otherwise selectedCampaign
+    const campaignAddress = viewingCampaign || selectedCampaign;
+    
+    if (!campaignAddress) {
+      alert("Please select or view a campaign first");
+      return;
+    }
+    
     try {
       const provider = await getProvider();
       const signer = await provider.getSigner();
@@ -1369,39 +1377,39 @@ function App() {
       const distRead = new ethers.Contract(ADDRESSES.distribute, distributeAbi, provider);
       const dist = new ethers.Contract(ADDRESSES.distribute, distributeAbi, signer);
 
-      // 1) pre-check: fonduri primite?
-      const notified: boolean = await distRead.fundingNotified();
+      // 1) pre-check: fonduri primite pentru aceasta campanie?
+      const notified: boolean = await distRead.campaignFundingNotified(campaignAddress);
       if (!notified) {
         alert("❌ Cannot claim funds. Funds have not been transferred to DistributeFunding yet.\n\nThe campaign owner must first transfer funds from the campaign to DistributeFunding.");
         return;
       }
 
-      // 2) pre-check: esti beneficiar + n-ai claim-uit deja
-      const b = await distRead.beneficiaries(account);
+      // 2) pre-check: esti beneficiar pentru aceasta campanie + n-ai claim-uit deja
+      const b = await distRead.beneficiaries(campaignAddress, account);
       // b = [weightBps, exists, claimed] (ethers iti da si index si nume)
       const exists: boolean = b.exists ?? b[1];
       const claimed: boolean = b.claimed ?? b[2];
 
       if (!exists) {
-        alert("❌ Cannot claim funds. This address is not registered as a beneficiary.\n\nOnly addresses added as beneficiaries by the campaign owner can claim funds.");
+        alert("❌ Cannot claim funds. This address is not registered as a beneficiary for this campaign.\n\nOnly addresses added as beneficiaries by the campaign owner can claim funds.");
         return;
       }
       if (claimed) {
-        alert("❌ Cannot claim funds. You have already claimed your share.\n\nEach beneficiary can only claim once.");
+        alert("❌ Cannot claim funds. You have already claimed your share for this campaign.\n\nEach beneficiary can only claim once per campaign.");
         return;
       }
 
-      // 3) call real
-      const tx = await dist.claim();
+      // 3) call real - pass campaign address
+      const tx = await dist.claim(campaignAddress);
       const receipt = await tx.wait();
       
       // Calculate the amount claimed
-      const totalReceived = await distRead.totalReceived();
+      const totalReceived = await distRead.campaignTotalReceived(campaignAddress);
       const weightBps = b.weightBps ?? b[0];
       const amountClaimed = (totalReceived * BigInt(weightBps)) / BigInt(10000);
       
       alert(`✅ Claim successful!\n\nYou received ${ethers.formatUnits(amountClaimed, tokenDecimals)} ${tokenSymbol}\n\nTransaction: ${receipt?.hash}`);
-      await refreshAll();
+      await refreshAll(undefined, campaignAddress);
     } catch (err: unknown) {
       console.error(err);
       alert(friendlyEthersError(err));
@@ -1906,7 +1914,7 @@ function App() {
                 <div style={{ marginBottom: "1.5rem" }}>
                   <h3 style={{ marginTop: 0, marginBottom: "0.5rem", color: "#ffffff" }}>0) Add Beneficiary (DistributeFunding)</h3>
                   <p style={{ marginBottom: "0.75rem", fontSize: "0.9em", color: "#b0b0b0" }}>
-                    <b style={{ color: "#ffffff" }}>Beneficiaries:</b> {benCount}{" "}
+                    <b style={{ color: "#ffffff" }}>Beneficiaries for this campaign:</b> {benCount}{" "}
                     {totalWeightBps !== "N/A" && (
                       <>
                         | <b style={{ color: "#ffffff" }}>Total weight (bps):</b> {totalWeightBps} / 10000

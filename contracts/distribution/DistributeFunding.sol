@@ -7,10 +7,10 @@ import "../interfaces/IToken.sol";
 
 /**
  * DistributeFunding:
- * - owner adauga beneficiari cu ponderi (basis points din 10000 = 100%)
- * - suma ponderilor NU poate depasi 10000 (100%)
+ * - owner adauga beneficiari cu ponderi (basis points din 10000 = 100%) PER CAMPAIGN
+ * - suma ponderilor NU poate depasi 10000 (100%) per campaign
  * - CrowdFunding transfera tokenuri aici si cheama notifyFundsReceived()
- * - fiecare beneficiar poate claim o singura data
+ * - fiecare beneficiar poate claim o singura data per campaign
  */
 contract DistributeFunding is Ownable, ReentrancyGuard {
     IToken public immutable token;
@@ -22,22 +22,24 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
         bool claimed;
     }
 
-    mapping(address => Beneficiary) public beneficiaries;
-    address[] public beneficiaryList;
+    // Per campaign: mapping(campaignAddress => mapping(beneficiaryAddress => Beneficiary))
+    mapping(address => mapping(address => Beneficiary)) public campaignBeneficiaries;
+    // Per campaign: list of beneficiary addresses
+    mapping(address => address[]) public campaignBeneficiaryList;
+    // Per campaign: total weight in basis points
+    mapping(address => uint16) public campaignTotalWeightBps;
 
-    uint256 public totalReceived;
-    bool public fundingNotified;
-
-    // suma ponderilor tuturor beneficiarilor (bps)
-    uint16 public totalWeightBps;
+    // Per campaign: total received and notification status
+    mapping(address => uint256) public campaignTotalReceived;
+    mapping(address => bool) public campaignFundingNotified;
 
     // optional: poti seta crowdFunding, ca sa restrictionezi notify
     address public crowdFunding;
 
-    event BeneficiaryAdded(address indexed who, uint16 weightBps);
+    event BeneficiaryAdded(address indexed campaign, address indexed who, uint16 weightBps);
     event CrowdFundingSet(address indexed cf);
-    event FundsNotified(uint256 totalAmount);
-    event Claimed(address indexed who, uint256 amount);
+    event FundsNotified(address indexed campaign, uint256 totalAmount);
+    event Claimed(address indexed campaign, address indexed who, uint256 amount);
 
     constructor(address token_) Ownable(msg.sender) {
         require(token_ != address(0), "token=0");
@@ -73,53 +75,6 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
         emit CrowdFundingSet(cf);
     }
 
-    function addBeneficiary(address who, uint16 weightBps) external {
-        // Allow either the contract owner OR the owner of ANY campaign that uses this DistributeFunding
-        bool isContractOwner = msg.sender == owner();
-        bool isCampaignOwner = false;
-        
-        // Check if msg.sender is owner of the campaign set in crowdFunding
-        if (crowdFunding != address(0)) {
-            (bool success, bytes memory data) = crowdFunding.staticcall(
-                abi.encodeWithSignature("owner()")
-            );
-            if (success && data.length >= 32) {
-                address campaignOwner = abi.decode(data, (address));
-                isCampaignOwner = msg.sender == campaignOwner;
-            }
-        }
-        
-        // Also check if msg.sender is owner of any campaign by trying to verify
-        // We'll allow any address that can prove they own a campaign with this DistributeFunding
-        // by checking if they own a campaign that has distributeFunding set to this contract
-        if (!isContractOwner && !isCampaignOwner) {
-            // Try to find if msg.sender owns any campaign that uses this DistributeFunding
-            // We'll check by trying to call owner() on potential campaign addresses
-            // But this is complex, so we'll use a simpler approach:
-            // Allow if msg.sender can prove they own a campaign by passing the campaign address
-            // For now, we'll just check the set crowdFunding
-            // A better solution would be to add a parameter for campaign address
-        }
-        
-        require(isContractOwner || isCampaignOwner, "not authorized");
-        require(who != address(0), "who=0");
-        require(weightBps > 0 && weightBps <= 10000, "bad weight");
-        require(!beneficiaries[who].exists, "exists");
-
-        // Fix: nu permitem suma ponderilor > 100%
-        require(uint256(totalWeightBps) + uint256(weightBps) <= 10000, "total weight > 100%");
-        totalWeightBps += weightBps;
-
-        beneficiaries[who] = Beneficiary({
-            weightBps: weightBps,
-            exists: true,
-            claimed: false
-        });
-        beneficiaryList.push(who);
-
-        emit BeneficiaryAdded(who, weightBps);
-    }
-    
     // New function: add beneficiary with campaign address verification
     function addBeneficiaryForCampaign(address who, uint16 weightBps, address campaignAddress) external {
         // Allow either the contract owner OR the owner of the specified campaign
@@ -149,20 +104,20 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
         require(isContractOwner || isCampaignOwner, "not authorized");
         require(who != address(0), "who=0");
         require(weightBps > 0 && weightBps <= 10000, "bad weight");
-        require(!beneficiaries[who].exists, "exists");
+        require(!campaignBeneficiaries[campaignAddress][who].exists, "exists");
 
-        // Fix: nu permitem suma ponderilor > 100%
-        require(uint256(totalWeightBps) + uint256(weightBps) <= 10000, "total weight > 100%");
-        totalWeightBps += weightBps;
+        // Fix: nu permitem suma ponderilor > 100% per campaign
+        require(uint256(campaignTotalWeightBps[campaignAddress]) + uint256(weightBps) <= 10000, "total weight > 100%");
+        campaignTotalWeightBps[campaignAddress] += weightBps;
 
-        beneficiaries[who] = Beneficiary({
+        campaignBeneficiaries[campaignAddress][who] = Beneficiary({
             weightBps: weightBps,
             exists: true,
             claimed: false
         });
-        beneficiaryList.push(who);
+        campaignBeneficiaryList[campaignAddress].push(who);
 
-        emit BeneficiaryAdded(who, weightBps);
+        emit BeneficiaryAdded(campaignAddress, who, weightBps);
     }
 
     /**
@@ -170,28 +125,30 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
      * Daca vrei strict: setezi crowdFunding si verifici msg.sender.
      */
     function notifyFundsReceived(uint256 totalAmount) external {
+        address campaign = msg.sender;
+        
         if (crowdFunding != address(0)) {
-            require(msg.sender == crowdFunding, "only CF");
+            require(campaign == crowdFunding, "only CF");
         }
-        require(!fundingNotified, "already notified");
+        require(!campaignFundingNotified[campaign], "already notified");
         require(totalAmount > 0, "amount=0");
 
-        // optional (sigur): macar un beneficiar
-        require(totalWeightBps > 0, "no beneficiaries");
+        // optional (sigur): macar un beneficiar pentru aceasta campanie
+        require(campaignTotalWeightBps[campaign] > 0, "no beneficiaries");
 
-        fundingNotified = true;
-        totalReceived = totalAmount;
+        campaignFundingNotified[campaign] = true;
+        campaignTotalReceived[campaign] = totalAmount;
 
-        emit FundsNotified(totalAmount);
+        emit FundsNotified(campaign, totalAmount);
     }
 
-    function claim() external nonReentrant {
-        require(fundingNotified, "not ready");
-        Beneficiary storage b = beneficiaries[msg.sender];
+    function claim(address campaignAddress) external nonReentrant {
+        require(campaignFundingNotified[campaignAddress], "not ready");
+        Beneficiary storage b = campaignBeneficiaries[campaignAddress][msg.sender];
         require(b.exists, "not beneficiary");
         require(!b.claimed, "already claimed");
 
-        uint256 amount = (totalReceived * uint256(b.weightBps)) / 10000;
+        uint256 amount = (campaignTotalReceived[campaignAddress] * uint256(b.weightBps)) / 10000;
         require(amount > 0, "amount=0");
 
         b.claimed = true;
@@ -199,10 +156,23 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
         bool ok = token.transfer(msg.sender, amount);
         require(ok, "transfer failed");
 
-        emit Claimed(msg.sender, amount);
+        emit Claimed(campaignAddress, msg.sender, amount);
     }
 
-    function beneficiariesCount() external view returns (uint256) {
-        return beneficiaryList.length;
+    function beneficiariesCount(address campaignAddress) external view returns (uint256) {
+        return campaignBeneficiaryList[campaignAddress].length;
+    }
+    
+    function totalWeightBps(address campaignAddress) external view returns (uint16) {
+        return campaignTotalWeightBps[campaignAddress];
+    }
+    
+    function beneficiaries(address campaignAddress, address beneficiaryAddress) external view returns (uint16 weightBps, bool exists, bool claimed) {
+        Beneficiary storage b = campaignBeneficiaries[campaignAddress][beneficiaryAddress];
+        return (b.weightBps, b.exists, b.claimed);
+    }
+    
+    function beneficiaryList(address campaignAddress, uint256 index) external view returns (address) {
+        return campaignBeneficiaryList[campaignAddress][index];
     }
 }
