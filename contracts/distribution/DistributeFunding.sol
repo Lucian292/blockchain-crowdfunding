@@ -48,8 +48,105 @@ contract DistributeFunding is Ownable, ReentrancyGuard {
         crowdFunding = cf;
         emit CrowdFundingSet(cf);
     }
+    
+    // Allow campaign owner to set crowdFunding for their campaign
+    function setCrowdFundingForCampaign(address cf) external {
+        require(cf != address(0), "cf=0");
+        
+        // Verify that msg.sender is the owner of the campaign
+        (bool success, bytes memory data) = cf.staticcall(
+            abi.encodeWithSignature("owner()")
+        );
+        require(success && data.length >= 32, "invalid campaign");
+        address campaignOwner = abi.decode(data, (address));
+        require(msg.sender == campaignOwner, "not campaign owner");
+        
+        // Verify that the campaign uses this DistributeFunding
+        (bool success2, bytes memory data2) = cf.staticcall(
+            abi.encodeWithSignature("distributeFunding()")
+        );
+        require(success2 && data2.length >= 32, "invalid campaign");
+        address campaignDistFunding = abi.decode(data2, (address));
+        require(campaignDistFunding == address(this), "wrong DistributeFunding");
+        
+        crowdFunding = cf;
+        emit CrowdFundingSet(cf);
+    }
 
-    function addBeneficiary(address who, uint16 weightBps) external onlyOwner {
+    function addBeneficiary(address who, uint16 weightBps) external {
+        // Allow either the contract owner OR the owner of ANY campaign that uses this DistributeFunding
+        bool isContractOwner = msg.sender == owner();
+        bool isCampaignOwner = false;
+        
+        // Check if msg.sender is owner of the campaign set in crowdFunding
+        if (crowdFunding != address(0)) {
+            (bool success, bytes memory data) = crowdFunding.staticcall(
+                abi.encodeWithSignature("owner()")
+            );
+            if (success && data.length >= 32) {
+                address campaignOwner = abi.decode(data, (address));
+                isCampaignOwner = msg.sender == campaignOwner;
+            }
+        }
+        
+        // Also check if msg.sender is owner of any campaign by trying to verify
+        // We'll allow any address that can prove they own a campaign with this DistributeFunding
+        // by checking if they own a campaign that has distributeFunding set to this contract
+        if (!isContractOwner && !isCampaignOwner) {
+            // Try to find if msg.sender owns any campaign that uses this DistributeFunding
+            // We'll check by trying to call owner() on potential campaign addresses
+            // But this is complex, so we'll use a simpler approach:
+            // Allow if msg.sender can prove they own a campaign by passing the campaign address
+            // For now, we'll just check the set crowdFunding
+            // A better solution would be to add a parameter for campaign address
+        }
+        
+        require(isContractOwner || isCampaignOwner, "not authorized");
+        require(who != address(0), "who=0");
+        require(weightBps > 0 && weightBps <= 10000, "bad weight");
+        require(!beneficiaries[who].exists, "exists");
+
+        // Fix: nu permitem suma ponderilor > 100%
+        require(uint256(totalWeightBps) + uint256(weightBps) <= 10000, "total weight > 100%");
+        totalWeightBps += weightBps;
+
+        beneficiaries[who] = Beneficiary({
+            weightBps: weightBps,
+            exists: true,
+            claimed: false
+        });
+        beneficiaryList.push(who);
+
+        emit BeneficiaryAdded(who, weightBps);
+    }
+    
+    // New function: add beneficiary with campaign address verification
+    function addBeneficiaryForCampaign(address who, uint16 weightBps, address campaignAddress) external {
+        // Allow either the contract owner OR the owner of the specified campaign
+        bool isContractOwner = msg.sender == owner();
+        bool isCampaignOwner = false;
+        
+        if (campaignAddress != address(0)) {
+            // Verify the campaign uses this DistributeFunding
+            (bool success1, bytes memory data1) = campaignAddress.staticcall(
+                abi.encodeWithSignature("distributeFunding()")
+            );
+            if (success1 && data1.length >= 32) {
+                address campaignDistFunding = abi.decode(data1, (address));
+                if (campaignDistFunding == address(this)) {
+                    // Campaign uses this DistributeFunding, check ownership
+                    (bool success2, bytes memory data2) = campaignAddress.staticcall(
+                        abi.encodeWithSignature("owner()")
+                    );
+                    if (success2 && data2.length >= 32) {
+                        address campaignOwner = abi.decode(data2, (address));
+                        isCampaignOwner = msg.sender == campaignOwner;
+                    }
+                }
+            }
+        }
+        
+        require(isContractOwner || isCampaignOwner, "not authorized");
         require(who != address(0), "who=0");
         require(weightBps > 0 && weightBps <= 10000, "bad weight");
         require(!beneficiaries[who].exists, "exists");
